@@ -70,18 +70,33 @@ def get_watchlist():
         print("Using small watchlist for testing (50 tickers). Set 'use_full_watchlist': true in config to expand.")
         return WATCHLIST[:50]  # Even smaller for ultra-fast test
 
+def download_with_retry(ticker, start=None, end=None, period=None, interval='1h', retries=3):
+    """Download with retry for yfinance errors"""
+    for attempt in range(retries):
+        try:
+            if start and end:
+                df = yf.download(ticker, start=start, end=end, interval=interval, progress=False)
+            else:
+                df = yf.download(ticker, period=period, interval=interval, progress=False)
+            if not df.empty:
+                return df
+        except Exception as e:
+            print(f"Download attempt {attempt+1} failed for {ticker}: {e}")
+            if attempt < retries - 1:
+                time.sleep(2 ** attempt)  # Exponential backoff
+    return pd.DataFrame()  # Return empty on final fail
+
 def download_batch(tickers_batch, start, end, interval):
-    """Download a batch of tickers"""
+    """Download a batch of tickers with retry"""
     batch_cache = {}
     for ticker in tickers_batch:
-        try:
-            df = yf.download(ticker, start=start, end=end, interval=interval, progress=False)
-            if not df.empty:
-                df['Ticker'] = ticker
-                batch_cache[ticker] = df
-                print(f"Downloaded {ticker}")
-        except Exception as e:
-            print(f"Error downloading {ticker}: {e}")
+        df = download_with_retry(ticker, start=start, end=end, interval=interval)
+        if not df.empty:
+            df['Ticker'] = ticker
+            batch_cache[ticker] = df
+            print(f"Downloaded {ticker}")
+        else:
+            print(f"Failed to download {ticker} after retries")
     return batch_cache
 
 def background_downloader():
@@ -124,38 +139,39 @@ def load_historical_cache():
     """Load cached historical data"""
     global HISTORICAL_CACHE
     if os.path.exists('historical_cache.pkl'):
-        with open('historical_cache.pkl', 'rb') as f:
-            HISTORICAL_CACHE = pickle.load(f)
-        print(f"Loaded cache for {len(HISTORICAL_CACHE)} tickers.")
+        try:
+            with open('historical_cache.pkl', 'rb') as f:
+                HISTORICAL_CACHE = pickle.load(f)
+            print(f"Loaded cache for {len(HISTORICAL_CACHE)} tickers.")
+        except Exception as e:
+            print(f"Cache load error: {e}")
+            HISTORICAL_CACHE = {}
 
 def get_current_data(ticker, period='5d', interval=None):
-    """Get recent data for scanning"""
+    """Get recent data for scanning with retry"""
     if interval is None:
         interval = CONFIG['interval']
-    try:
-        df = yf.download(ticker, period=period, interval=interval, progress=False)
-        if not df.empty:
-            df['Range'] = df['High'] - df['Low']
-            df['Body'] = abs(df['Close'] - df['Open'])
-            df['Body_Low'] = np.minimum(df['Open'], df['Close'])
-            df['Lower_Wick'] = df['Body_Low'] - df['Low']
-            df['Upper_Wick'] = df['High'] - np.maximum(df['Open'], df['Close'])
-            # Rolling avg volume
-            df['Avg_Vol'] = df['Volume'].rolling(window=CONFIG['rolling_periods']).mean()
-            df['Rel_Vol'] = df['Volume'] / df['Avg_Vol']
-            # Volatility: std of ranges
-            if CONFIG['volatility_measure'] == 'std_range':
-                df['Volatility'] = df['Range'].rolling(window=CONFIG['rolling_periods']).std()
-            # Today's range: assume daily high-low, but for hourly, approximate with max range today or fetch 1d
-            # For simplicity, use current bar range vs rolling vol
-            df['Current_Range'] = df['Range']
-            return df
-    except:
-        return pd.DataFrame()
+    df = download_with_retry(ticker, period=period, interval=interval)
+    if not df.empty:
+        df['Range'] = df['High'] - df['Low']
+        df['Body'] = abs(df['Close'] - df['Open'])
+        df['Body_Low'] = np.minimum(df['Open'], df['Close'])
+        df['Lower_Wick'] = df['Body_Low'] - df['Low']
+        df['Upper_Wick'] = df['High'] - np.maximum(df['Open'], df['Close'])
+        # Rolling avg volume
+        df['Avg_Vol'] = df['Volume'].rolling(window=CONFIG['rolling_periods']).mean()
+        df['Rel_Vol'] = df['Volume'] / df['Avg_Vol']
+        # Volatility: std of ranges
+        if CONFIG['volatility_measure'] == 'std_range':
+            df['Volatility'] = df['Range'].rolling(window=CONFIG['rolling_periods']).std()
+        # Today's range: assume daily high-low, but for hourly, approximate with max range today or fetch 1d
+        # For simplicity, use current bar range vs rolling vol
+        df['Current_Range'] = df['Range']
+    return df  # Always return DataFrame (empty if failed)
 
 def is_hammer(df, idx, top_percent):
     """Check if candle at idx is hammer: body in top X% of range"""
-    if idx < 0:
+    if idx < 0 or len(df) == 0:
         return False
     row = df.iloc[idx]
     range_val = row['Range']
@@ -166,24 +182,21 @@ def is_hammer(df, idx, top_percent):
 
 def is_inverted_hammer(df, idx, bottom_percent=0.20):  # Symmetric for bottom
     """Inverted hammer: body in bottom 20%"""
-    if idx < 0:
+    if idx < 0 or len(df) == 0:
         return False
     row = df.iloc[idx]
     range_val = row['Range']
     if range_val == 0:
         return False
-    body_high_rel = (row['High'] - np.maximum(row['Open'], df['Close'])) / range_val
+    body_high_rel = (row['High'] - np.maximum(row['Open'], row['Close'])) / range_val  # Fixed: row['Close']
     return body_high_rel <= bottom_percent
 
 def get_todays_range(ticker):
     """Get today's high-low so far"""
     today = datetime.now().strftime('%Y-%m-%d')
-    try:
-        daily = yf.download(ticker, start=today, period='1d', interval='1d', progress=False)
-        if not daily.empty:
-            return daily['High'].max() - daily['Low'].min()
-    except:
-        pass
+    df = download_with_retry(ticker, start=today, period='1d', interval='1d')
+    if not df.empty:
+        return df['High'].max() - df['Low'].min()
     return 0
 
 def scan_for_signals():
@@ -271,7 +284,7 @@ def find_historical_hammers(ticker, df_hist, is_long=True, n_periods=50):
 
 def calculate_probability(ticker, current_df, is_long=True):
     """Fit logistic regression on historical hammers and predict"""
-    if ticker not in HISTORICAL_CACHE:
+    if ticker not in HISTORICAL_CACHE or HISTORICAL_CACHE[ticker].empty:
         return 0.5  # Default
     df_hist = HISTORICAL_CACHE[ticker].copy()
     # Align interval, assume same
@@ -309,7 +322,7 @@ def calculate_probability(ticker, current_df, is_long=True):
 def create_plotly_chart(ticker, signal_time, is_long=True):
     """Create Plotly chart with highlighted candle"""
     df = get_current_data(ticker, period='10d')  # Last 10 days
-    if df.empty:
+    if df is None or df.empty:  # Handle None or empty
         return None
     
     # Highlight the signal candle - assume last one for simplicity
@@ -425,7 +438,7 @@ def chart(ticker, signal_time, is_long):
         </body>
         </html>
         """
-    return "Chart not available", 404
+    return "Chart not available - data fetch failed. Try refreshing.", 404
 
 @app.route('/download_historical')
 def download_historical():
