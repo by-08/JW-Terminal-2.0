@@ -1,0 +1,69 @@
+<!-- templates/config.html -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Config - Hammer Scanner</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-gray-900 text-white p-4">
+    <div class="max-w-md mx-auto">
+        <h1 class="text-2xl font-bold mb-4">Settings</h1>
+        <form method="POST" action="/config_ui">
+            <div class="mb-4">
+                <label class="block mb-2">Body Top Percent (%)</label>
+                <input type="number" step="0.01" name="body_top_percent" value="{{ config.body_top_percent }}" class="w-full p-2 bg-gray-800 rounded">
+            </div>
+            <div class="mb-4">
+                <label class="block mb-2">Rel Vol Threshold</label>
+                <input type="number" step="0.1" name="rel_vol_threshold" value="{{ config.rel_vol_threshold }}" class="w-full p-2 bg-gray-800 rounded">
+            </div>
+            <div class="mb-4">
+                <label class="block mb-2">Vol Multiplier</label>
+                <input type="number" step="0.1" name="vol_multiplier" value="{{ config.vol_multiplier }}" class="w-full p-2 bg-gray-800 rounded">
+            </div>
+            <div class="mb-4">
+                <label class="block mb-2">Historical Periods</label>
+                <input type="number" name="historical_periods" value="{{ config.historical_periods }}" class="w-full p-2 bg-gray-800 rounded">
+            </div>
+            <div class="mb-4">
+                <label class="block mb-2">Return Target (%)</label>
+                <input type="number" step="0.01" name="return_target" value="{{ config.return_target }}" class="w-full p-2 bg-gray-800 rounded">
+            </div>
+            <div class="mb-4">
+                <label class="block mb-2">Lookforward Periods</label>
+                <input type="number" name="lookforward_periods" value="{{ config.lookforward_periods }}" class="w-full p-2 bg-gray-800 rounded">
+            </div>
+            <div class="mb-4">
+                <label class="block mb-2">Rolling Periods</label>
+                <input type="number" name="rolling_periods" value="{{ config.rolling_periods }}" class="w-full p-2 bg-gray-800 rounded">
+            </div>
+            <div class="mb-4">
+                <label class="block mb-2">Historical Start Date</label>
+                <input type="date" name="historical_start" value="{{ config.historical_start }}" class="w-full p-2 bg-gray-800 rounded">
+            </div>
+            <div class="mb-4">
+                <label class="block mb-2">Historical End Date</label>
+                <input type="date" name="historical_end" value="{{ config.historical_end }}" class="w-full p-2 bg-gray-800 rounded">
+            </div>
+            <div class="mb-4">
+                <label class="block mb-2">Interval</label>
+                <select name="interval" class="w-full p-2 bg-gray-800 rounded">
+                    <option value="15m" {% if config.interval == '15m' %}selected{% endif %}>15m</option>
+                    <option value="1h" {% if config.interval == '1h' %}selected{% endif %}>1h</option>
+                    <option value="4h" {% if config.interval == '4h' %}selected{% endif %}>4h</option>
+                    <option value="1d" {% if config.interval == '1d' %}selected{% endif %}>1d</option>
+                </select>
+            </div>
+            <div class="mb-4">
+                <label class="block mb-2">
+                    <input type="checkbox" name="use_full_watchlist" {% if config.use_full_watchlist %}checked{% endif %}> Use Full Watchlist
+                </label>
+            </div>
+            <button type="submit" class="bg-green-500 px-4 py-2 rounded w-full">Save</button>
+        </form>
+        <a href="/" class="block mt-4 text-blue-400 text-center">Back to Scanner</a>
+    </div>
+</body>
+</html>

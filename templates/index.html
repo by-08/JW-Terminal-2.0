@@ -4,7 +4,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>John Wick Terminal 2.0</title> 
+    <title>Hammer Scanner</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script>
         tailwind.config = { darkMode: 'class', theme: { extend: { colors: { primary: '#3b82f6' } } } }
@@ -16,56 +16,68 @@
 </head>
 <body class="min-h-screen p-4">
     <div class="max-w-4xl mx-auto">
-        <h1 class="text-3xl font-bold mb-4 text-center">John Wick Terminal 2.0</h1>
+        <h1 class="text-3xl font-bold mb-4 text-center">Hammer Scanner</h1>
         <div id="signals" class="grid gap-4"></div>
         <div class="mt-8 text-center">
             <button onclick="refresh()" class="bg-blue-500 px-4 py-2 rounded">Refresh</button>
             <button onclick="openConfig()" class="bg-green-500 px-4 py-2 rounded ml-2">Config</button>
+            <button onclick="downloadHistorical()" class="bg-purple-500 px-4 py-2 rounded ml-2">Download Historical</button>
         </div>
     </div>
     <script>
-    function renderSignals(signals) {
-        console.log('Signals fetched:', signals);  // Log to console
-        const container = document.getElementById('signals');
-        if (signals.length === 0) {
-            container.innerHTML = '<p class="text-gray-500 text-center">No signals yet. Waiting for scan at :55...</p>';  // Fallback message
-            return;
+        function renderSignals(signals) {
+            console.log('Signals fetched:', signals);  // Log to console
+            const container = document.getElementById('signals');
+            if (signals.length === 0) {
+                container.innerHTML = '<p class="text-gray-500 text-center">No signals yet. Waiting for scan at :55...</p>';  // Fallback message
+                return;
+            }
+            container.innerHTML = signals.map(s => `
+                <div class="bg-gray-800 p-4 rounded-lg cursor-pointer hover:bg-gray-700" onclick="openChart('${s.ticker}', '${s.time}', ${s.is_long})">
+                    <h3 class="font-bold">${s.ticker} - ${s.type}</h3>
+                    <p>Time: ${s.time}</p>
+                    <p>Probability: ${(s.probability * 100).toFixed(1)}%</p>
+                </div>
+            `).join('');
         }
-        container.innerHTML = signals.map(s => `
-            <div class="bg-gray-800 p-4 rounded-lg cursor-pointer hover:bg-gray-700" onclick="openChart('${s.ticker}', '${s.time}', ${s.is_long})">
-                <h3 class="font-bold">${s.ticker} - ${s.type}</h3>
-                <p>Time: ${s.time}</p>
-                <p>Probability: ${(s.probability * 100).toFixed(1)}%</p>
-            </div>
-        `).join('');
-    }
 
-    async function fetchSignals() {
-        try {
-            const res = await fetch('/signals');
-            if (!res.ok) console.error('Fetch error:', res.status);
-            const signals = await res.json();
-            renderSignals(signals);
-        } catch (err) {
-            console.error('Fetch failed:', err);
+        async function fetchSignals() {
+            try {
+                const res = await fetch('/signals');
+                if (!res.ok) console.error('Fetch error:', res.status);
+                const signals = await res.json();
+                renderSignals(signals);
+            } catch (err) {
+                console.error('Fetch failed:', err);
+            }
         }
-    }
 
-    function refresh() {
-        fetchSignals();
-    }
+        function refresh() {
+            fetchSignals();
+        }
 
-    function openChart(ticker, time, is_long) {
-        window.open(`/chart/${ticker}/${time}/${is_long}`, '_blank');
-    }
+        function openChart(ticker, time, is_long) {
+            window.open(`/chart/${ticker}/${time}/${is_long}`, '_blank');
+        }
 
-    function openConfig() {
-        window.open('/config', '_blank');
-    }
+        function openConfig() {
+            window.open('/config_ui', '_blank');
+        }
 
-    // Auto refresh every 60s
-    setInterval(fetchSignals, 60000);
-    fetchSignals();  // Initial load
-</script>
+        async function downloadHistorical() {
+            try {
+                const res = await fetch('/download_historical');
+                const data = await res.json();
+                alert(data.status);  // Simple feedback
+            } catch (err) {
+                console.error('Download queue failed:', err);
+                alert('Download queued, check logs.');
+            }
+        }
+
+        // Auto refresh every 60s
+        setInterval(fetchSignals, 60000);
+        fetchSignals();  // Initial load
+    </script>
 </body>
 </html>

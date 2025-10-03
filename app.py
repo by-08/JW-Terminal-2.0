@@ -7,7 +7,7 @@ import json
 import numpy as np
 import pandas as pd
 from datetime import datetime, timedelta
-from flask import Flask, render_template, jsonify, request, send_file
+from flask import Flask, render_template, jsonify, request, send_file, redirect, url_for
 import yfinance as yf
 from sklearn.linear_model import LogisticRegression
 from sklearn.preprocessing import StandardScaler
@@ -128,8 +128,10 @@ def load_historical_cache():
             HISTORICAL_CACHE = pickle.load(f)
         print(f"Loaded cache for {len(HISTORICAL_CACHE)} tickers.")
 
-def get_current_data(ticker, period='5d', interval='1h'):
+def get_current_data(ticker, period='5d', interval=None):
     """Get recent data for scanning"""
+    if interval is None:
+        interval = CONFIG['interval']
     try:
         df = yf.download(ticker, period=period, interval=interval, progress=False)
         if not df.empty:
@@ -170,7 +172,7 @@ def is_inverted_hammer(df, idx, bottom_percent=0.20):  # Symmetric for bottom
     range_val = row['Range']
     if range_val == 0:
         return False
-    body_high_rel = (row['High'] - np.maximum(row['Open'], row['Close'])) / range_val
+    body_high_rel = (row['High'] - np.maximum(row['Open'], df['Close'])) / range_val
     return body_high_rel <= bottom_percent
 
 def get_todays_range(ticker):
@@ -387,6 +389,27 @@ def config():
             })
         return jsonify({'status': 'updated'})
     return jsonify(CONFIG)
+
+@app.route('/config_ui', methods=['GET', 'POST'])
+def config_ui():
+    if request.method == 'POST':
+        data = request.form
+        global CONFIG
+        for key, value in data.items():
+            if key in CONFIG:
+                if key == 'use_full_watchlist':
+                    CONFIG[key] = value == 'on'
+                else:
+                    CONFIG[key] = float(value) if '.' in value else int(value)
+        # Queue download if relevant changes
+        if any(k in data for k in ['historical_start', 'historical_end', 'interval']):
+            download_queue.put({
+                'historical_start': CONFIG['historical_start'],
+                'historical_end': CONFIG['historical_end'],
+                'interval': CONFIG['interval']
+            })
+        return redirect(url_for('index'))
+    return render_template('config.html', config=CONFIG)
 
 @app.route('/chart/<ticker>/<signal_time>/<is_long>')
 def chart(ticker, signal_time, is_long):
