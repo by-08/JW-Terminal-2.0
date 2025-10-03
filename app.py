@@ -14,66 +14,111 @@ from sklearn.preprocessing import StandardScaler
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import warnings
+import queue  # For batching downloads
 warnings.filterwarnings('ignore')
 
 app = Flask(__name__)
 
 # Global configurations - adjustable via /config endpoint (POST)
 CONFIG = {
-    'body_top_percent': 0.20,  # Body in top 20% of range
-    'rel_vol_threshold': 1.5,  # Relative volume > 1.5
-    'vol_multiplier': 1.5,     # Today's range > 1.5 * rolling vol
-    'historical_periods': 50,  # Last 50 historical hammers
-    'return_target': 0.02,     # 2% rise/fall
-    'lookforward_periods': 5,  # In 5 hours/bars
-    'interval': '1h',          # Default 1h, options: '1d', '4h', '1h', '15m' - but scan is hourly, so '1h' primary
-    'historical_start': (datetime.now() - timedelta(days=365)).strftime('%Y-%m-%d'),
+    'body_top_percent': 0.20,
+    'rel_vol_threshold': 1.5,
+    'vol_multiplier': 1.5,
+    'historical_periods': 50,
+    'return_target': 0.02,
+    'lookforward_periods': 5,
+    'interval': '1h',
+    'historical_start': (datetime.now() - timedelta(days=30)).strftime('%Y-%m-%d'),  # Shorter default for speed
     'historical_end': datetime.now().strftime('%Y-%m-%d'),
-    'rolling_periods': 30,     # For rel vol and volatility
-    'volatility_measure': 'std_range',  # 'std_range' or 'atr' - simple std of ranges for now
+    'rolling_periods': 30,
+    'volatility_measure': 'std_range',
+    'use_full_watchlist': False,  # New: False for small list (testing), True for full ~600
 }
 
 # Cache for historical data: dict of ticker: df (OHLCV)
 HISTORICAL_CACHE = {}
 # Current signals: list of dicts
 SIGNALS = []
+# Download queue for batching
+download_queue = queue.Queue()
 
-# Watchlist
-WATCHLIST = []
+# Watchlist - smaller default
+WATCHLIST = ['AAPL', 'MSFT', 'GOOGL', 'AMZN', 'NVDA', 'META', 'TSLA', 'BRK-B', 'UNH', 'JNJ', 'JPM', 'V', 'PG', 'XOM', 'AVGO', 'HD', 'MA', 'CVX', 'PFE', 'ABBV', 'KO', 'MRK', 'BAC', 'ADBE', 'CRM', 'COST', 'TMO', 'ACN', 'WMT', 'NFLX', 'LIN', 'TXN', 'ABT', 'LT', 'DHR', 'NEE', 'TMUS', 'CSCO', 'WFC', 'DIS', 'VZ', 'PM', 'RTX', 'ORCL', 'INTC', 'SPY', 'QQQ', 'IWM', 'GLD', 'TLT']
 
 def get_watchlist():
     global WATCHLIST
-    if WATCHLIST:
+    if CONFIG['use_full_watchlist']:
+        # Full watchlist (only if flagged)
+        try:
+            print("Fetching full watchlist from Wikipedia...")
+            sp500_url = 'https://en.wikipedia.org/wiki/List_of_S%26P_500_companies'
+            sp500_table = pd.read_html(sp500_url)[0]
+            sp500_tickers = sp500_table['Symbol'].tolist()
+            
+            nasdaq_url = 'https://en.wikipedia.org/wiki/Nasdaq-100'
+            nasdaq_table = pd.read_html(nasdaq_url)[1]
+            nasdaq_tickers = nasdaq_table['Ticker'].tolist()
+            
+            etfs = ['SPY', 'QQQ', 'IWM', 'GLD', 'TLT', 'EEM', 'XLF', 'XLE', 'XLK', 'XLV']
+            WATCHLIST = list(set(sp500_tickers + nasdaq_tickers + etfs))
+            print(f"Full watchlist loaded: {len(WATCHLIST)} tickers.")
+        except Exception as e:
+            print(f"Watchlist fetch failed: {e}. Falling back to small list.")
+            WATCHLIST = WATCHLIST[:50]  # Fallback
         return WATCHLIST
-    # S&P 500
-    sp500_url = 'https://en.wikipedia.org/wiki/List_of_S%26P_500_companies'
-    sp500_table = pd.read_html(sp500_url)[0]
-    sp500_tickers = sp500_table['Symbol'].tolist()
-    # Nasdaq 100
-    nasdaq_url = 'https://en.wikipedia.org/wiki/Nasdaq-100'
-    nasdaq_table = pd.read_html(nasdaq_url)[1]  # Second table
-    nasdaq_tickers = nasdaq_table['Ticker'].tolist()
-    # Big ETFs
-    etfs = ['SPY', 'QQQ', 'IWM', 'GLD', 'TLT', 'EEM', 'XLF', 'XLE', 'XLK', 'XLV']
-    WATCHLIST = list(set(sp500_tickers + nasdaq_tickers + etfs))
-    return WATCHLIST
+    else:
+        print("Using small watchlist for testing (50 tickers). Set 'use_full_watchlist': true in config to expand.")
+        return WATCHLIST[:50]  # Even smaller for ultra-fast test
 
-def download_historical_data(start, end, interval='1h'):
-    """Download and cache historical data for all tickers"""
-    global HISTORICAL_CACHE
-    tickers = get_watchlist()
-    HISTORICAL_CACHE = {}
-    for ticker in tickers:
+def download_batch(tickers_batch, start, end, interval):
+    """Download a batch of tickers"""
+    batch_cache = {}
+    for ticker in tickers_batch:
         try:
             df = yf.download(ticker, start=start, end=end, interval=interval, progress=False)
             if not df.empty:
                 df['Ticker'] = ticker
-                HISTORICAL_CACHE[ticker] = df
+                batch_cache[ticker] = df
+                print(f"Downloaded {ticker}")
         except Exception as e:
             print(f"Error downloading {ticker}: {e}")
-    # Save cache
-    with open('historical_cache.pkl', 'wb') as f:
-        pickle.dump(HISTORICAL_CACHE, f)
+    return batch_cache
+
+def background_downloader():
+    """Background thread for batched historical downloads"""
+    global HISTORICAL_CACHE
+    while True:
+        try:
+            # Get next batch from queue (or initial full)
+            if download_queue.empty():
+                tickers = get_watchlist()
+                batch_size = 50  # Adjust for speed (Render free: ~5-10s per batch)
+                for i in range(0, len(tickers), batch_size):
+                    batch = tickers[i:i+batch_size]
+                    print(f"Starting batch {i//batch_size + 1}/{(len(tickers)-1)//batch_size + 1}")
+                    batch_cache = download_batch(batch, CONFIG['historical_start'], CONFIG['historical_end'], CONFIG['interval'])
+                    HISTORICAL_CACHE.update(batch_cache)
+                    time.sleep(1)  # Rate limit politeness
+                # Save full cache
+                with open('historical_cache.pkl', 'wb') as f:
+                    pickle.dump(HISTORICAL_CACHE, f)
+                print("Historical download complete.")
+                load_historical_cache()  # Reload if needed
+            else:
+                # Handle queued updates (e.g., config change)
+                item = download_queue.get()
+                if isinstance(item, dict):  # {'start': ..., 'end': ..., 'interval': ...}
+                    # Update config and re-download
+                    CONFIG.update({k: v for k, v in item.items() if k in ['historical_start', 'historical_end', 'interval']})
+                    download_queue.task_done()
+                    # Clear and restart download
+                    HISTORICAL_CACHE.clear()
+                    if os.path.exists('historical_cache.pkl'):
+                        os.remove('historical_cache.pkl')
+                    background_downloader()  # Recursive call after clear
+        except Exception as e:
+            print(f"Downloader error: {e}")
+        time.sleep(60)  # Check queue every min
 
 def load_historical_cache():
     """Load cached historical data"""
@@ -81,6 +126,7 @@ def load_historical_cache():
     if os.path.exists('historical_cache.pkl'):
         with open('historical_cache.pkl', 'rb') as f:
             HISTORICAL_CACHE = pickle.load(f)
+        print(f"Loaded cache for {len(HISTORICAL_CACHE)} tickers.")
 
 def get_current_data(ticker, period='5d', interval='1h'):
     """Get recent data for scanning"""
@@ -140,11 +186,13 @@ def get_todays_range(ticker):
 
 def scan_for_signals():
     """Scan all tickers for signals"""
+    print("Starting scan...")
     global SIGNALS
     tickers = get_watchlist()
     now = datetime.now()
     current_minute = now.minute
-    if current_minute != 55:  # Run only at :55
+    if current_minute != 55:
+        print(f"Skipping scan (not :55, current min: {current_minute})")
         return
     new_signals = []
     for ticker in tickers:
@@ -169,6 +217,7 @@ def scan_for_signals():
                 'is_long': True
             }
             new_signals.append(signal)
+            print(f"Signal found: {ticker} Hammer Long, prob: {prob}")
         
         # Inverted Hammer short
         bottom_percent = CONFIG['body_top_percent']  # Symmetric
@@ -185,8 +234,10 @@ def scan_for_signals():
                 'is_long': False
             }
             new_signals.append(signal)
+            print(f"Signal found: {ticker} Inverted Hammer Short, prob: {prob}")
     
     SIGNALS = new_signals  # Update global
+    print(f"Scan complete: {len(new_signals)} signals generated.")
 
 def find_historical_hammers(ticker, df_hist, is_long=True, n_periods=50):
     """Find last n historical hammers in historical df"""
@@ -290,8 +341,9 @@ def create_plotly_chart(ticker, signal_time, is_long=True):
     chart_html = fig.to_html(full_html=False)
     return chart_html
 
-# Background thread
+# Background thread for scanner
 def background_scanner():
+    print("Scanner thread started.")
     while True:
         now = datetime.now()
         minutes_to_55 = (55 - now.minute) % 60
@@ -303,6 +355,15 @@ def background_scanner():
 # Routes
 @app.route('/')
 def index():
+    # Add dummy signal for initial demo (remove after testing)
+    if not SIGNALS:
+        SIGNALS.append({
+            'ticker': 'AAPL',
+            'time': datetime.now().strftime('%Y-%m-%d %H:%M'),
+            'type': 'Test Hammer Long',
+            'probability': 0.65,
+            'is_long': True
+        })
     return render_template('index.html')
 
 @app.route('/signals')
@@ -317,9 +378,13 @@ def config():
         for key, value in data.items():
             if key in CONFIG:
                 CONFIG[key] = value
-        # If historical dates changed, download
-        if 'historical_start' in data or 'historical_end' in data:
-            download_historical_data(CONFIG['historical_start'], CONFIG['historical_end'], CONFIG['interval'])
+        # If historical dates changed, queue download
+        if any(k in data for k in ['historical_start', 'historical_end', 'interval']):
+            download_queue.put({
+                'historical_start': CONFIG['historical_start'],
+                'historical_end': CONFIG['historical_end'],
+                'interval': CONFIG['interval']
+            })
         return jsonify({'status': 'updated'})
     return jsonify(CONFIG)
 
@@ -344,14 +409,18 @@ def download_historical():
     start = request.args.get('start', CONFIG['historical_start'])
     end = request.args.get('end', CONFIG['historical_end'])
     interval = request.args.get('interval', CONFIG['interval'])
-    download_historical_data(start, end, interval)
-    load_historical_cache()  # Reload
-    return jsonify({'status': 'downloaded'})
+    # Queue for background (non-blocking)
+    download_queue.put({'start': start, 'end': end, 'interval': interval})
+    return jsonify({'status': 'queued for background download'})
 
 if __name__ == '__main__':
     get_watchlist()
     load_historical_cache()
-    # Start background thread
+    # Start download thread
+    downloader_thread = threading.Thread(target=background_downloader, daemon=True)
+    downloader_thread.start()
+    # Start scanner thread
     scanner_thread = threading.Thread(target=background_scanner, daemon=True)
     scanner_thread.start()
+    print("App starting with threads...")
     app.run(debug=False, host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
